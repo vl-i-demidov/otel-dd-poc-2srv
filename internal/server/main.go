@@ -4,7 +4,11 @@ import (
 	"context"
 	"fmt"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
+	"go.opentelemetry.io/otel/trace"
 	muxtrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
 	"io/ioutil"
 	"log"
@@ -62,10 +66,11 @@ func execForwardHandler(baseUrl, path string, w http.ResponseWriter, r *http.Req
 	forwardHandler(fmt.Sprintf("http://%s/%s", baseUrl, path), w, r)
 }
 func forwardHandler(url string, w http.ResponseWriter, r *http.Request) {
-
 	log.Println("Request is forwarded to", url)
-	ctx := context.TODO()
 
+	ctx := r.Context()
+
+	// generate request
 	request, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 
 	for k, v := range r.URL.Query() {
@@ -74,8 +79,17 @@ func forwardHandler(url string, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// create span
+	ctx, span := startSpan(ctx, r)
+	defer span.End()
+
+	// inject span context into request
+	injectSpanContext(ctx, request)
+
 	client := http.DefaultClient
 	res, err := client.Do(request)
+
+	enrichSpan(span, res)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -89,4 +103,21 @@ func forwardHandler(url string, w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprintf(w, "%s", string(body))
+}
+
+func startSpan(ctx context.Context, r *http.Request) (context.Context, trace.Span) {
+	context, span := otel.Tracer("").Start(ctx, "outbound.call", trace.WithSpanKind(trace.SpanKindClient))
+	span.SetAttributes(semconv.HTTPClientAttributesFromHTTPRequest(r)...)
+	return context, span
+}
+
+func injectSpanContext(ctx context.Context, r *http.Request) (context.Context, *http.Request) {
+	context, request := otelhttptrace.W3C(ctx, r) // is this line needed?
+	otelhttptrace.Inject(context, request)
+	return context, request
+}
+
+func enrichSpan(span trace.Span, resp *http.Response) {
+	span.SetAttributes(attribute.Int("outbound.status_code", resp.StatusCode))
+	span.SetStatus(semconv.SpanStatusFromHTTPStatusCode(resp.StatusCode))
 }
