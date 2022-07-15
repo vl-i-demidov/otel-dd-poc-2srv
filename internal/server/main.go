@@ -32,29 +32,38 @@ func StartMain(cfg config.Config) {
 		defer stopProfiling()
 	}
 
-	var router *mux.Router
+	var router CustomRouter
 
 	if cfg.Tracing.Protocol == config.TracingDD {
+		log.Print("DataDog tracing enabled")
+
 		stopTracing := dd.StartTracing()
 		defer stopTracing()
 
 		// Create a traced mux router.
 		// if router is created before trace.Start call, serviceName will be overriden
-		traceRouter := muxtrace.NewRouter()
-		router = traceRouter.Router
+		router = muxtrace.NewRouter()
 	} else if cfg.Tracing.Protocol == config.TracingOTEL {
+		log.Print("OpenTelemetry tracing enabled")
+
 		stopTraceExporter := oteldt.SetUpOtelTracing(cfg.Tracing)
 		defer stopTraceExporter()
 
-		router = mux.NewRouter()
-		router.Use(
+		simpleRouter := mux.NewRouter()
+		simpleRouter.Use(
 			otelmux.Middleware(cfg.Tracing.Service, otelmux.WithTracerProvider(otel.GetTracerProvider())),
 		)
+		router = simpleRouter
+
 	}
 
-	// Continue using the router as you normally would.
 	router.HandleFunc("/ping", pingHandler)
 	http.ListenAndServe(fmt.Sprintf(":%d", cfg.HttpPort), router)
+}
+
+type CustomRouter interface {
+	http.Handler
+	HandleFunc(path string, f func(http.ResponseWriter, *http.Request)) *mux.Route
 }
 
 func pingHandler(w http.ResponseWriter, r *http.Request) {
