@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/gorilla/mux"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
 	"go.opentelemetry.io/otel"
@@ -23,8 +24,6 @@ var globalCfg config.Config
 func StartMain(cfg config.Config) {
 	globalCfg = cfg
 
-	log.Println(cfg.HttpPort)
-
 	if cfg.Profiling.Enabled {
 		stopProfiling, err := dd.StartProfiling()
 		if err != nil {
@@ -33,24 +32,29 @@ func StartMain(cfg config.Config) {
 		defer stopProfiling()
 	}
 
-	// Create a traced mux router.
-	mux := muxtrace.NewRouter()
+	var router *mux.Router
 
 	if cfg.Tracing.Protocol == config.TracingDD {
 		stopTracing := dd.StartTracing()
 		defer stopTracing()
+
+		// Create a traced mux router.
+		// if router is created before trace.Start call, serviceName will be overriden
+		traceRouter := muxtrace.NewRouter()
+		router = traceRouter.Router
 	} else if cfg.Tracing.Protocol == config.TracingOTEL {
 		stopTraceExporter := oteldt.SetUpOtelTracing(cfg.Tracing)
 		defer stopTraceExporter()
 
-		mux.Use(
+		router = mux.NewRouter()
+		router.Use(
 			otelmux.Middleware(cfg.Tracing.Service, otelmux.WithTracerProvider(otel.GetTracerProvider())),
 		)
 	}
 
 	// Continue using the router as you normally would.
-	mux.HandleFunc("/ping", pingHandler)
-	http.ListenAndServe(fmt.Sprintf(":%d", cfg.HttpPort), mux)
+	router.HandleFunc("/ping", pingHandler)
+	http.ListenAndServe(fmt.Sprintf(":%d", cfg.HttpPort), router)
 }
 
 func pingHandler(w http.ResponseWriter, r *http.Request) {
