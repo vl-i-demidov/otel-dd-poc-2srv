@@ -1,0 +1,69 @@
+version: '3.4'
+
+services:
+
+  # VARS HARDCODED TEMPORARY FOR SIMPLICITY
+  # BUT THEY NEED TO BE IN SYNC WITH .env
+  service-a:
+    image: otel-dd-poc
+    labels:
+      com.datadoghq.tags.env: qa
+      com.datadoghq.tags.service: service-a
+      com.datadoghq.tags.version: 0.0.1
+    build:
+      context: .
+    environment:
+      - DD_ENV=qa
+      - DD_SERVICE=service-a
+      - DD_VERSION=0.0.1
+      - DD_AGENT_HOST=datadog-agent
+      - DD_TRACE_AGENT_PORT=8126
+      # OTLP ingestion
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
+    ports:
+      - 8001:8001
+#      - 8002:8002
+    command: /app a.env
+
+  service-b:
+    image: otel-dd-poc
+    labels:
+      com.datadoghq.tags.env: qa
+      com.datadoghq.tags.service: service-b
+      com.datadoghq.tags.version: 0.0.1
+    environment:
+      - DD_ENV=qa
+      - DD_SERVICE=service-b
+      - DD_VERSION=0.0.1
+      - DD_AGENT_HOST=datadog-agent
+      - DD_TRACE_AGENT_PORT=8126
+      # OTLP ingestion
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
+    ports:
+#      - 8001:8001
+      - 8002:8002
+    command: /app b.env
+
+  datadog-agent:
+    image: datadog/agent:latest
+    environment:
+      - DD_API_KEY=${DD_API_KEY}
+      - DD_APM_ENABLED=true
+      - DD_APM_NON_LOCAL_TRAFFIC=true
+      # OTLP ingestion
+      - DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT=0.0.0.0:4317
+      # misc
+      - DD_LOG_LEVEL=debug
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8126/info"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
+    ports:
+      - "5003:5003"
+      - "8126:8126"
+      - "4317:4317"
