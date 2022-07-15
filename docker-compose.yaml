@@ -20,6 +20,9 @@ services:
       - DD_TRACE_AGENT_PORT=8126
       # OTLP ingestion
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
+      # Headers propagation
+      - DD_PROPAGATION_STYLE_INJECT=Datadog,B3
+      - DD_PROPAGATION_STYLE_EXTRACT=Datadog,B3
     ports:
       - 8001:8001
 #      - 8002:8002
@@ -39,6 +42,9 @@ services:
       - DD_TRACE_AGENT_PORT=8126
       # OTLP ingestion
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
+      # Headers propagation
+      - DD_PROPAGATION_STYLE_INJECT=Datadog,B3
+      - DD_PROPAGATION_STYLE_EXTRACT=Datadog,B3
     ports:
 #      - 8001:8001
       - 8002:8002

@@ -2,6 +2,7 @@ package otel
 
 import (
 	"context"
+	"go.opentelemetry.io/contrib/propagators/b3"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
@@ -51,9 +52,11 @@ func SetUpOtelTracing(cfg config.Tracing) (stop func()) {
 		tracesdk.WithResource(res),
 	)
 
-	// set global propagator to tracecontext (the default is no-op).
-	// is it necessary???
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	// create OTEL+B3 propagators to handle (inject/extract) multiple tracing headers formats
+	// OTEL supports B3 format https://opentelemetry.io/docs/instrumentation/go/manual/#propagators-and-context
+	// datadog supports B3 format https://docs.datadoghq.com/tracing/trace_collection/custom_instrumentation/go/#b3-headers-extraction-and-injection
+	compositePropagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, b3.New())
+	otel.SetTextMapPropagator(compositePropagator)
 	// set global trace provider
 	otel.SetTracerProvider(tracerProvider)
 

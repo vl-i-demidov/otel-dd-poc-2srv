@@ -7,10 +7,9 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
 	"go.opentelemetry.io/otel/trace"
 	muxtrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
+	ddtracer "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -19,6 +18,8 @@ import (
 	oteldt "otel-dd-poc-2srv/internal/dt/otel"
 )
 
+// DT book, p. 55 - propagator stack - headers are _injected_ for all registered propagators (OTEL, DD(?), B3),
+// _context_ is extracted once it found in any propagator
 var globalCfg config.Config
 
 func StartMain(cfg config.Config) {
@@ -54,7 +55,6 @@ func StartMain(cfg config.Config) {
 			otelmux.Middleware(cfg.Tracing.Service, otelmux.WithTracerProvider(otel.GetTracerProvider())),
 		)
 		router = simpleRouter
-
 	}
 
 	router.HandleFunc("/ping", pingHandler)
@@ -76,9 +76,10 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func execForwardHandler(baseUrl, path string, w http.ResponseWriter, r *http.Request) {
-	forwardHandler(fmt.Sprintf("http://%s/%s", baseUrl, path), w, r)
+	forwardHandlerGeneric(fmt.Sprintf("http://%s/%s", baseUrl, path), w, r)
 }
-func forwardHandler(url string, w http.ResponseWriter, r *http.Request) {
+
+func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 	log.Println("Request is forwarded to", url)
 
 	ctx := r.Context()
@@ -93,16 +94,15 @@ func forwardHandler(url string, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// create span
-	ctx, span := startSpan(ctx, r)
-	defer span.End()
+	ctx, span := startSpanItem(ctx)
+	defer span.end()
 
 	// inject span context into request
-	injectSpanContext(ctx, request)
+	span.injectContextIntoRequest(ctx, request)
 
-	client := http.DefaultClient
-	res, err := client.Do(request)
+	res, err := http.DefaultClient.Do(request)
 
-	enrichSpan(span, res)
+	span.enrichWithResponse(res)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -118,19 +118,70 @@ func forwardHandler(url string, w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "%s", string(body))
 }
 
-func startSpan(ctx context.Context, r *http.Request) (context.Context, trace.Span) {
-	context, span := otel.Tracer("").Start(ctx, "outbound.call", trace.WithSpanKind(trace.SpanKindClient))
-	span.SetAttributes(semconv.HTTPClientAttributesFromHTTPRequest(r)...)
-	return context, span
+// https://docs.datadoghq.com/tracing/trace_collection/custom_instrumentation/go/
+func startSpanItem(ctx context.Context) (context.Context, spanItem) {
+	var s spanItem
+	var context context.Context
+	if globalCfg.Tracing.Protocol == config.TracingDD {
+		span, ddctx := ddtracer.StartSpanFromContext(ctx, "outbound.call")
+		s = &datadogSpan{span}
+		context = ddctx
+	} else if globalCfg.Tracing.Protocol == config.TracingOTEL {
+		otelctx, span := otel.Tracer("").Start(ctx, "outbound.call", trace.WithSpanKind(trace.SpanKindClient))
+		//span.SetAttributes(semconv.HTTPClientAttributesFromHTTPRequest(r)...)
+		s = &otelSpan{span}
+		context = otelctx
+	} else {
+		s = &noopSpan{}
+		context = ctx
+	}
+
+	return context, s
 }
 
-func injectSpanContext(ctx context.Context, r *http.Request) (context.Context, *http.Request) {
+type spanItem interface {
+	end()
+	injectContextIntoRequest(ctx context.Context, r *http.Request)
+	enrichWithResponse(resp *http.Response)
+}
+
+type datadogSpan struct {
+	ddtracer.Span
+}
+
+func (s *datadogSpan) end() {
+	s.Finish()
+}
+
+func (s *datadogSpan) injectContextIntoRequest(ctx context.Context, r *http.Request) {
+	ddtracer.Inject(s.Context(), ddtracer.HTTPHeadersCarrier(r.Header))
+}
+
+func (s *datadogSpan) enrichWithResponse(resp *http.Response) {
+	// noop for now
+}
+
+type otelSpan struct {
+	trace.Span
+}
+
+func (s *otelSpan) end() {
+	s.End()
+}
+
+func (s *otelSpan) injectContextIntoRequest(ctx context.Context, r *http.Request) {
 	context, request := otelhttptrace.W3C(ctx, r) // is this line needed?
 	otelhttptrace.Inject(context, request)
-	return context, request
 }
 
-func enrichSpan(span trace.Span, resp *http.Response) {
-	span.SetAttributes(attribute.Int("outbound.status_code", resp.StatusCode))
-	span.SetStatus(semconv.SpanStatusFromHTTPStatusCode(resp.StatusCode))
+func (s *otelSpan) enrichWithResponse(resp *http.Response) {
+	// noop for now
 }
+
+type noopSpan struct{}
+
+func (s *noopSpan) end() {}
+
+func (s *noopSpan) injectContextIntoRequest(ctx context.Context, r *http.Request) {}
+
+func (s *noopSpan) enrichWithResponse(resp *http.Response) {}
