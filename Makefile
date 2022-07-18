@@ -13,3 +13,7 @@ ping-a:
 .PHONY: ping-ab
 ping-ab:
 	curl http://localhost:8001/ping?forward=true
+
+.PHONY: ping-ba
+ping-ba:
+	curl http://localhost:8002/ping?forward=true

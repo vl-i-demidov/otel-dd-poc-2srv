@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	muxtrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
@@ -14,12 +13,11 @@ import (
 	"log"
 	"net/http"
 	"otel-dd-poc-2srv/internal/config"
+	"otel-dd-poc-2srv/internal/dt"
 	"otel-dd-poc-2srv/internal/dt/dd"
 	oteldt "otel-dd-poc-2srv/internal/dt/otel"
 )
 
-// DT book, p. 55 - propagator stack - headers are _injected_ for all registered propagators (OTEL, DD(?), B3),
-// _context_ is extracted once it found in any propagator
 var globalCfg config.Config
 
 func StartMain(cfg config.Config) {
@@ -95,14 +93,14 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 
 	// create span
 	ctx, span := startSpanItem(ctx)
-	defer span.end()
+	defer span.Stop()
 
 	// inject span context into request
-	span.injectContextIntoRequest(ctx, request)
+	span.InjectContextIntoRequest(ctx, request)
 
 	res, err := http.DefaultClient.Do(request)
 
-	span.enrichWithResponse(res)
+	span.EnrichWithResponse(res)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -118,70 +116,22 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "%s", string(body))
 }
 
-// https://docs.datadoghq.com/tracing/trace_collection/custom_instrumentation/go/
-func startSpanItem(ctx context.Context) (context.Context, spanItem) {
-	var s spanItem
-	var context context.Context
+func startSpanItem(ctx context.Context) (context.Context, dt.SpanItem) {
+	var s dt.SpanItem
+	var resCtx context.Context
 	if globalCfg.Tracing.Protocol == config.TracingDD {
 		span, ddctx := ddtracer.StartSpanFromContext(ctx, "outbound.call")
-		s = &datadogSpan{span}
-		context = ddctx
+		s = &dd.DatadogSpan{Span: span}
+		resCtx = ddctx
 	} else if globalCfg.Tracing.Protocol == config.TracingOTEL {
 		otelctx, span := otel.Tracer("").Start(ctx, "outbound.call", trace.WithSpanKind(trace.SpanKindClient))
 		//span.SetAttributes(semconv.HTTPClientAttributesFromHTTPRequest(r)...)
-		s = &otelSpan{span}
-		context = otelctx
+		s = &oteldt.OtelSpan{Span: span}
+		resCtx = otelctx
 	} else {
-		s = &noopSpan{}
-		context = ctx
+		s = &dt.NoopSpan{}
+		resCtx = ctx
 	}
 
-	return context, s
+	return resCtx, s
 }
-
-type spanItem interface {
-	end()
-	injectContextIntoRequest(ctx context.Context, r *http.Request)
-	enrichWithResponse(resp *http.Response)
-}
-
-type datadogSpan struct {
-	ddtracer.Span
-}
-
-func (s *datadogSpan) end() {
-	s.Finish()
-}
-
-func (s *datadogSpan) injectContextIntoRequest(ctx context.Context, r *http.Request) {
-	ddtracer.Inject(s.Context(), ddtracer.HTTPHeadersCarrier(r.Header))
-}
-
-func (s *datadogSpan) enrichWithResponse(resp *http.Response) {
-	// noop for now
-}
-
-type otelSpan struct {
-	trace.Span
-}
-
-func (s *otelSpan) end() {
-	s.End()
-}
-
-func (s *otelSpan) injectContextIntoRequest(ctx context.Context, r *http.Request) {
-	context, request := otelhttptrace.W3C(ctx, r) // is this line needed?
-	otelhttptrace.Inject(context, request)
-}
-
-func (s *otelSpan) enrichWithResponse(resp *http.Response) {
-	// noop for now
-}
-
-type noopSpan struct{}
-
-func (s *noopSpan) end() {}
-
-func (s *noopSpan) injectContextIntoRequest(ctx context.Context, r *http.Request) {}
-
-func (s *noopSpan) enrichWithResponse(resp *http.Response) {}
