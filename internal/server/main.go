@@ -95,8 +95,19 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 	ctx, span := startSpanItem(ctx)
 	defer span.Stop()
 
+	// THE WRONG WAY [DEPRECATED]
 	// inject span context into request
 	span.InjectContextIntoRequest(ctx, request)
+
+	// THE RIGHT WAY IS NOT TO INJECT MANUALLY BUT USE INSTRUMENTED CLIENTS (NOT TESTED THOUGH)
+
+	// DD
+	// httptrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
+	//client := httptrace.WrapClient(&http.Client{})
+
+	// OTEL
+	// "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	// client := http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
 
 	res, err := http.DefaultClient.Do(request)
 
