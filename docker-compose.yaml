@@ -4,17 +4,18 @@ services:
 
   # VARS HARDCODED TEMPORARY FOR SIMPLICITY
   # BUT THEY NEED TO BE IN SYNC WITH .env
-  service-a:
+  otel-test-service-a:
     image: otel-dd-poc
     labels:
-      com.datadoghq.tags.env: qa
-      com.datadoghq.tags.service: service-a
+      com.datadoghq.tags.env: staging
+      com.datadoghq.tags.service: otel-test-service-a
       com.datadoghq.tags.version: 0.0.1
     build:
       context: .
     environment:
-      - DD_ENV=qa
-      - DD_SERVICE=service-a
+      - DD_TRACE_SAMPLE_RATE=0.1
+      - DD_ENV=staging
+      - DD_SERVICE=otel-test-service-a
       - DD_VERSION=0.0.1
       - DD_AGENT_HOST=datadog-agent
       - DD_TRACE_AGENT_PORT=8126
@@ -28,15 +29,16 @@ services:
 #      - 8002:8002
     command: /app a.env
 
-  service-b:
+  otel-test-service-b:
     image: otel-dd-poc
     labels:
-      com.datadoghq.tags.env: qa
-      com.datadoghq.tags.service: service-b
+      com.datadoghq.tags.env: staging
+      com.datadoghq.tags.service: otel-test-service-b
       com.datadoghq.tags.version: 0.0.1
     environment:
-      - DD_ENV=qa
-      - DD_SERVICE=service-b
+#      - DD_TRACE_SAMPLE_RATE=0.5
+      - DD_ENV=staging
+      - DD_SERVICE=otel-test-service-b
       - DD_VERSION=0.0.1
       - DD_AGENT_HOST=datadog-agent
       - DD_TRACE_AGENT_PORT=8126
@@ -53,13 +55,15 @@ services:
   datadog-agent:
     image: datadog/agent:latest
     environment:
+#      - DD_APM_MAX_TPS=100
       - DD_API_KEY=${DD_API_KEY}
       - DD_APM_ENABLED=true
       - DD_APM_NON_LOCAL_TRAFFIC=true
+      - DD_SITE=datadoghq.eu
       # OTLP ingestion
       - DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT=0.0.0.0:4317
       # misc
-      - DD_LOG_LEVEL=debug
+      - DD_LOG_LEVEL=info
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8126/info"]
       interval: 1s

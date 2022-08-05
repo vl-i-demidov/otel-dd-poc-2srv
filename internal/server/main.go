@@ -5,17 +5,22 @@ import (
 	"fmt"
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	muxtrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
+	//"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	ddhttp "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
 	ddtracer "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"otel-dd-poc-2srv/internal/config"
 	"otel-dd-poc-2srv/internal/dt"
 	"otel-dd-poc-2srv/internal/dt/dd"
 	oteldt "otel-dd-poc-2srv/internal/dt/otel"
+	"time"
 )
 
 var globalCfg config.Config
@@ -65,11 +70,27 @@ type CustomRouter interface {
 }
 
 func pingHandler(w http.ResponseWriter, r *http.Request) {
+	for k, v := range r.URL.Query() {
+		if k != "forward" {
+			log.Println(k, "=", v)
+		}
+	}
 	frwd := r.URL.Query().Get("forward")
 	if frwd == "true" {
 		execForwardHandler(globalCfg.ForwardEndpoint, "ping", w, r)
 		return
 	}
+
+	sleep := rand.Int63n(1000)
+	time.Sleep(time.Duration(sleep) * time.Millisecond)
+
+	err := r.URL.Query().Get("error")
+	if err == "true" {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("500 - Intentional error happened"))
+		return
+	}
+
 	w.Write([]byte(fmt.Sprintf("PONG from %s", globalCfg.Tracing.Service)))
 }
 
@@ -85,31 +106,21 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 	// generate request
 	request, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 
+	query := request.URL.Query()
 	for k, v := range r.URL.Query() {
 		if k != "forward" {
-			request.URL.Query().Add(k, v[0])
+			query.Add(k, v[0])
 		}
 	}
+	request.URL.RawQuery = query.Encode()
 
 	// create span
 	ctx, span := startSpanItem(ctx)
 	defer span.Stop()
 
-	// THE WRONG WAY [DEPRECATED]
-	// inject span context into request
-	span.InjectContextIntoRequest(ctx, request)
+	client := getHttpClient()
 
-	// THE RIGHT WAY IS NOT TO INJECT MANUALLY BUT USE INSTRUMENTED CLIENTS (NOT TESTED THOUGH)
-
-	// DD
-	// httptrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
-	//client := httptrace.WrapClient(&http.Client{})
-
-	// OTEL
-	// "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	// client := http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
-
-	res, err := http.DefaultClient.Do(request)
+	res, err := client.Do(request)
 
 	span.EnrichWithResponse(res)
 
@@ -127,6 +138,17 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "%s", string(body))
 }
 
+func getHttpClient() *http.Client {
+	var client *http.Client
+	if globalCfg.Tracing.Protocol == config.TracingDD {
+		client = ddhttp.WrapClient(&http.Client{})
+	} else if globalCfg.Tracing.Protocol == config.TracingOTEL {
+		client = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
+	} else {
+		client = http.DefaultClient
+	}
+	return client
+}
 func startSpanItem(ctx context.Context) (context.Context, dt.SpanItem) {
 	var s dt.SpanItem
 	var resCtx context.Context
