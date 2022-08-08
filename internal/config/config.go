@@ -26,3 +26,12 @@ type Tracing struct {
 type Profiling struct {
 	Enabled bool `mapstructure:"PROFILING_ENABLED"`
 }
+
+type Tracing2 struct {
+	ReceiverEndpoint string `mapstructure:"TRACING_RECEIVER_ENDPOINT"`
+
+	// TODO: this should be in a common config
+	Environment string `mapstructure:"ENVIRONMENT"`
+	Service     string `mapstructure:"SERVICE"`
+	AppVersion  string `mapstructure:"APP_VERSION"`
+}
