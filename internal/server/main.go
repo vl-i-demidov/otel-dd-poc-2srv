@@ -1,25 +1,21 @@
 package server
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gorilla/mux/otelmux"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/trace"
-	muxtrace "gopkg.in/DataDog/dd-trace-go.v1/contrib/gorilla/mux"
-	//"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	ddhttp "gopkg.in/DataDog/dd-trace-go.v1/contrib/net/http"
-	ddtracer "gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
+	"go.opentelemetry.io/otel/attribute"
+	"otel-dd-poc-2srv/internal/pkg/monitoring/tracer"
+
 	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
 	"otel-dd-poc-2srv/internal/config"
-	"otel-dd-poc-2srv/internal/dt"
 	"otel-dd-poc-2srv/internal/dt/dd"
-	oteldt "otel-dd-poc-2srv/internal/dt/otel"
 	"time"
 )
 
@@ -36,37 +32,21 @@ func StartMain(cfg config.Config) {
 		defer stopProfiling()
 	}
 
-	var router CustomRouter
+	// TODO: check what happens if receiver is unavailable
+	stopTraceExporter, err := tracer.StartTracing(cfg.Tracing)
+	defer stopTraceExporter()
 
-	if cfg.Tracing.Protocol == config.TracingDD {
-		log.Print("DataDog tracing enabled")
-
-		stopTracing := dd.StartTracing()
-		defer stopTracing()
-
-		// Create a traced mux router.
-		// if router is created before trace.Start call, serviceName will be overriden
-		router = muxtrace.NewRouter()
-	} else if cfg.Tracing.Protocol == config.TracingOTEL {
-		log.Print("OpenTelemetry tracing enabled")
-
-		stopTraceExporter := oteldt.SetUpOtelTracing(cfg.Tracing)
-		defer stopTraceExporter()
-
-		simpleRouter := mux.NewRouter()
-		simpleRouter.Use(
-			otelmux.Middleware(cfg.Tracing.Service, otelmux.WithTracerProvider(otel.GetTracerProvider())),
-		)
-		router = simpleRouter
+	if err != nil {
+		// TODO: should be a warning
+		log.Println("Couldn't start tracer")
 	}
+	router := mux.NewRouter()
+	router.Use(
+		otelmux.Middleware(cfg.Tracing.Service, otelmux.WithTracerProvider(otel.GetTracerProvider())),
+	)
 
 	router.HandleFunc("/ping", pingHandler)
 	http.ListenAndServe(fmt.Sprintf(":%d", cfg.HttpPort), router)
-}
-
-type CustomRouter interface {
-	http.Handler
-	HandleFunc(path string, f func(http.ResponseWriter, *http.Request)) *mux.Route
 }
 
 func pingHandler(w http.ResponseWriter, r *http.Request) {
@@ -81,13 +61,20 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var err error
+	_, stop := tracer.Trace(r.Context(), "perform.ping",
+		attribute.String("time", time.Now().String()))
+	defer func() { stop(err) }()
+
 	sleep := rand.Int63n(1000)
 	time.Sleep(time.Duration(sleep) * time.Millisecond)
 
-	err := r.URL.Query().Get("error")
-	if err == "true" {
+	errMsg := r.URL.Query().Get("error")
+	if errMsg != "" {
+		err = errors.New(errMsg)
+
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("500 - Intentional error happened"))
+		w.Write([]byte(fmt.Sprintf("500 - %v", err)))
 		return
 	}
 
@@ -103,6 +90,11 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// create span
+	var err error
+	ctx, stop := tracer.Trace(ctx, "forward.request", attribute.String("forward.url", url))
+	defer func() { stop(err) }()
+
 	// generate request
 	request, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 
@@ -114,15 +106,11 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 	}
 	request.URL.RawQuery = query.Encode()
 
-	// create span
-	ctx, span := startSpanItem(ctx)
-	defer span.Stop()
-
 	client := getHttpClient()
 
 	res, err := client.Do(request)
 
-	span.EnrichWithResponse(res)
+	//span.EnrichWithResponse(res)
 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -139,32 +127,6 @@ func forwardHandlerGeneric(url string, w http.ResponseWriter, r *http.Request) {
 }
 
 func getHttpClient() *http.Client {
-	var client *http.Client
-	if globalCfg.Tracing.Protocol == config.TracingDD {
-		client = ddhttp.WrapClient(&http.Client{})
-	} else if globalCfg.Tracing.Protocol == config.TracingOTEL {
-		client = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
-	} else {
-		client = http.DefaultClient
-	}
+	var client = &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)}
 	return client
-}
-func startSpanItem(ctx context.Context) (context.Context, dt.SpanItem) {
-	var s dt.SpanItem
-	var resCtx context.Context
-	if globalCfg.Tracing.Protocol == config.TracingDD {
-		span, ddctx := ddtracer.StartSpanFromContext(ctx, "outbound.call")
-		s = &dd.DatadogSpan{Span: span}
-		resCtx = ddctx
-	} else if globalCfg.Tracing.Protocol == config.TracingOTEL {
-		otelctx, span := otel.Tracer("").Start(ctx, "outbound.call", trace.WithSpanKind(trace.SpanKindClient))
-		//span.SetAttributes(semconv.HTTPClientAttributesFromHTTPRequest(r)...)
-		s = &oteldt.OtelSpan{Span: span}
-		resCtx = otelctx
-	} else {
-		s = &dt.NoopSpan{}
-		resCtx = ctx
-	}
-
-	return resCtx, s
 }
